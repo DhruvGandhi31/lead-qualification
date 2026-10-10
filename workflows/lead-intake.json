@@ -1,0 +1,1338 @@
+{
+  "id": "lead-intake",
+  "name": "Lead Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n001-lead-webhook",
+      "name": "Lead webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cred-webhook-secret",
+          "name": "Lead webhook shared secret"
+        }
+      },
+      "webhookId": "lead-intake-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nif (!body || typeof body !== 'object' || Array.isArray(body)) {\n  return [{ json: { valid: false, errors: ['body must be a JSON object'] } }];\n}\nconst clean = (v) => (typeof v === 'string' ? v : '').replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '').trim();\nconst name = clean(body.name).replace(/\\s+/g, ' ');\nconst email = clean(body.email).toLowerCase();\nconst phoneRaw = clean(body.phone);\nconst message = clean(body.message);\nconst source = clean(body.source);\nconst errors = [];\nif (!name || name.length > 200) errors.push('name is required (1-200 characters)');\nif (email.length > 254 || !/^[^\\s@,;<>\"']+@[^\\s@,;<>\"']+\\.[^\\s@,;<>\"']{2,}$/.test(email)) errors.push('email is missing or not a valid address');\nlet phone = '';\nif (phoneRaw) {\n  phone = phoneRaw.replace(/[\\s().-]/g, '');\n  if (!/^\\+?[0-9]{7,15}$/.test(phone)) errors.push('phone must be 7-15 digits, optionally starting with +');\n}\nif (!message || message.length > 5000) errors.push('message is required (1-5000 characters)');\nif (!/^[A-Za-z0-9_-]{1,40}$/.test(source)) errors.push('source is required (letters, digits, - or _, max 40 characters)');\nif (errors.length) return [{ json: { valid: false, errors } }];\nreturn [{ json: { valid: true, lead: { name, email, phone, message, source } } }];"
+      },
+      "id": "n002-validate-&-normalise",
+      "name": "Validate & Normalise",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n003-valid-input?",
+      "name": "Valid input?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, error: 'validation_failed', details: $json.errors } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "n004-respond-400",
+      "name": "Respond 400",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        660,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO leads (lead_hash, name, email, phone, message, source)\n  VALUES (encode(sha256(convert_to(lower($1::text) || E'\\n' || $4::text, 'UTF8')), 'hex'),\n          $2::text, $1::text, NULLIF($3::text, ''), $4::text, $5::text)\n  ON CONFLICT (lead_hash) DO NOTHING\n  RETURNING id\n)\nSELECT id::int AS lead_id, TRUE AS inserted FROM ins\nUNION ALL\nSELECT id::int, FALSE FROM leads\n WHERE lead_hash = encode(sha256(convert_to(lower($1::text) || E'\\n' || $4::text, 'UTF8')), 'hex')\n   AND NOT EXISTS (SELECT 1 FROM ins);",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead.email, $json.lead.name, $json.lead.phone, $json.lead.message, $json.lead.source ] }}"
+        }
+      },
+      "id": "n005-insert-lead-(idempotent)",
+      "name": "Insert lead (idempotent)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        660,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.inserted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n006-new-lead?",
+      "name": "New lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (lead_id, event, score, llm_output, action_taken, detail)\nVALUES ($1::bigint, 'duplicate_ignored', NULL, NULL, 'none (duplicate submission ignored)', $2::jsonb)\nRETURNING lead_id::int AS lead_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead_id, JSON.stringify({ source: $('Validate & Normalise').first().json.lead.source }) ] }}"
+        }
+      },
+      "id": "n007-audit:-duplicate",
+      "name": "Audit: duplicate",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1100,
+        360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, duplicate: true, lead_id: $json.lead_id } }}",
+        "options": {}
+      },
+      "id": "n008-respond-duplicate",
+      "name": "Respond duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1320,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "=/data/prompts/qualify.{{ $env.QUALIFY_PROMPT_VERSION || 'v1' }}.*",
+        "options": {}
+      },
+      "id": "n009-read-prompt-+-schema",
+      "name": "Read prompt + schema",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "options": {}
+      },
+      "id": "n010-extract-text",
+      "name": "Extract text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1320,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const texts = $input.all().map((i) => String(i.json.data ?? ''));\nlet schema = null;\nlet prompt = null;\nfor (const t of texts) {\n  if (schema === null && t.trimStart().startsWith('{')) {\n    try { const p = JSON.parse(t); if (p && p.properties) { schema = p; continue; } } catch (e) { /* not the schema */ }\n  }\n  if (prompt === null) prompt = t;\n}\nif (!schema || !prompt) throw new Error('Could not load the qualify prompt and schema from /data/prompts');\nif (!$env.CLAUDE_MODEL) throw new Error('CLAUDE_MODEL is not set');\n\nconst lead = $('Validate & Normalise').first().json.lead;\nconst lead_id = $('Insert lead (idempotent)').first().json.lead_id;\nconst strip = (s) => String(s).replace(/<\\/?lead>/gi, '');\nconst userText = `<lead>\\nSource: ${strip(lead.source)}\\nName: ${strip(lead.name)}\\nEmail: ${strip(lead.email)}\\nPhone: ${strip(lead.phone) || '(not provided)'}\\nMessage:\\n${strip(lead.message)}\\n</lead>`;\n\nreturn [{ json: {\n  lead_id, lead, schema,\n  model: $env.CLAUDE_MODEL,\n  prompt_version: $env.QUALIFY_PROMPT_VERSION || 'v1',\n  attempt: 1,\n  request: { model: $env.CLAUDE_MODEL, max_tokens: 2048, system: prompt, messages: [{ role: 'user', content: userText }] },\n} }];"
+      },
+      "id": "n011-prepare-claude-request",
+      "name": "Prepare Claude request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ANTHROPIC_BASE_URL }}/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "n012-claude-(attempt-1)",
+      "name": "Claude (attempt 1)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1760,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cred-anthropic",
+          "name": "Anthropic API key"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nconst schema = $('Prepare Claude request').first().json.schema;\nconst ATTEMPT = 1;\n\nfunction check(s, v) {\n  const errs = [];\n  if (s.type === 'object') {\n    if (v === null || typeof v !== 'object' || Array.isArray(v)) return ['response must be a JSON object'];\n    for (const k of s.required || []) if (!(k in v)) errs.push(`missing required key \"${k}\"`);\n    if (s.additionalProperties === false) for (const k of Object.keys(v)) if (!(k in s.properties)) errs.push(`unexpected key \"${k}\"`);\n    for (const [k, sub] of Object.entries(s.properties || {})) if (k in v) errs.push(...check(sub, v[k]).map((e) => `${k}: ${e}`));\n  } else if (s.type === 'string') {\n    if (typeof v !== 'string') return ['must be a string'];\n    if (s.enum && !s.enum.includes(v)) errs.push(`must be one of ${s.enum.join('|')}`);\n    if (s.minLength !== undefined && v.length < s.minLength) errs.push(`must be at least ${s.minLength} characters`);\n    if (s.maxLength !== undefined && v.length > s.maxLength) errs.push(`must be at most ${s.maxLength} characters`);\n  }\n  return errs;\n}\n\nconst fail = (errors, raw = '') => [{ json: { ok: false, attempt: ATTEMPT, errors, raw: String(raw).slice(0, 2000) } }];\n\nif (res.error || res.type === 'error') {\n  const e = res.error;\n  const msg = typeof e === 'string' ? e : (e && (e.message || e.type)) || 'unknown API error';\n  return fail([`Claude API error: ${msg}`]);\n}\nconst blocks = Array.isArray(res.content) ? res.content : [];\nconst text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('').trim();\nif (!text) return fail(['empty response (no text content)']);\n\nlet candidate = text;\nconst fenced = text.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\nif (fenced) candidate = fenced[1].trim();\nelse if (!candidate.startsWith('{')) {\n  const a = candidate.indexOf('{'); const b = candidate.lastIndexOf('}');\n  if (a !== -1 && b > a) candidate = candidate.slice(a, b + 1);\n}\nlet parsed;\ntry { parsed = JSON.parse(candidate); } catch (e) { return fail(['response is not valid JSON'], text); }\nconst errors = check(schema, parsed);\nif (errors.length) return fail(errors, text);\nreturn [{ json: { ok: true, attempt: ATTEMPT, result: parsed, errors: [] } }];"
+      },
+      "id": "n013-validate-output-(1)",
+      "name": "Validate output (1)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n014-valid-output?-(1)",
+      "name": "Valid output? (1)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2200,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Prepare Claude request').first().json;\nconst prev = $input.first().json;\nconst request = JSON.parse(JSON.stringify(base.request));\nif (prev.raw) {\n  request.messages.push(\n    { role: 'assistant', content: String(prev.raw).trim() },\n    { role: 'user', content: `That reply was not valid: ${prev.errors.join('; ')}. Reply again with ONLY the JSON object, using exactly the required keys.` },\n  );\n}\nreturn [{ json: { ...base, request, attempt: 2 } }];"
+      },
+      "id": "n015-prepare-retry",
+      "name": "Prepare retry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ANTHROPIC_BASE_URL }}/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "n016-claude-(attempt-2)",
+      "name": "Claude (attempt 2)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2420,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cred-anthropic",
+          "name": "Anthropic API key"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nconst schema = $('Prepare Claude request').first().json.schema;\nconst ATTEMPT = 2;\n\nfunction check(s, v) {\n  const errs = [];\n  if (s.type === 'object') {\n    if (v === null || typeof v !== 'object' || Array.isArray(v)) return ['response must be a JSON object'];\n    for (const k of s.required || []) if (!(k in v)) errs.push(`missing required key \"${k}\"`);\n    if (s.additionalProperties === false) for (const k of Object.keys(v)) if (!(k in s.properties)) errs.push(`unexpected key \"${k}\"`);\n    for (const [k, sub] of Object.entries(s.properties || {})) if (k in v) errs.push(...check(sub, v[k]).map((e) => `${k}: ${e}`));\n  } else if (s.type === 'string') {\n    if (typeof v !== 'string') return ['must be a string'];\n    if (s.enum && !s.enum.includes(v)) errs.push(`must be one of ${s.enum.join('|')}`);\n    if (s.minLength !== undefined && v.length < s.minLength) errs.push(`must be at least ${s.minLength} characters`);\n    if (s.maxLength !== undefined && v.length > s.maxLength) errs.push(`must be at most ${s.maxLength} characters`);\n  }\n  return errs;\n}\n\nconst fail = (errors, raw = '') => [{ json: { ok: false, attempt: ATTEMPT, errors, raw: String(raw).slice(0, 2000) } }];\n\nif (res.error || res.type === 'error') {\n  const e = res.error;\n  const msg = typeof e === 'string' ? e : (e && (e.message || e.type)) || 'unknown API error';\n  return fail([`Claude API error: ${msg}`]);\n}\nconst blocks = Array.isArray(res.content) ? res.content : [];\nconst text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text).join('').trim();\nif (!text) return fail(['empty response (no text content)']);\n\nlet candidate = text;\nconst fenced = text.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\nif (fenced) candidate = fenced[1].trim();\nelse if (!candidate.startsWith('{')) {\n  const a = candidate.indexOf('{'); const b = candidate.lastIndexOf('}');\n  if (a !== -1 && b > a) candidate = candidate.slice(a, b + 1);\n}\nlet parsed;\ntry { parsed = JSON.parse(candidate); } catch (e) { return fail(['response is not valid JSON'], text); }\nconst errors = check(schema, parsed);\nif (errors.length) return fail(errors, text);\nreturn [{ json: { ok: true, attempt: ATTEMPT, result: parsed, errors: [] } }];"
+      },
+      "id": "n017-validate-output-(2)",
+      "name": "Validate output (2)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n018-valid-output?-(2)",
+      "name": "Valid output? (2)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2860,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nconst base = $('Prepare Claude request').first().json;\nconst common = { lead_id: base.lead_id, lead: base.lead, model: base.model, prompt_version: base.prompt_version };\nif (j.ok) {\n  return [{ json: { ...common, route: j.result.score, result: j.result, attempts: j.attempt, failure: null } }];\n}\nreturn [{ json: { ...common, route: 'needs_review', result: null, attempts: j.attempt,\n  failure: { reason: 'LLM output invalid or unavailable after retry', errors: j.errors, raw: j.raw } } }];"
+      },
+      "id": "n019-collect-result",
+      "name": "Collect result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\n   SET status = $2::text,\n       score = NULLIF($3::text, ''),\n       intent = $4::text, urgency = $5::text, budget_signal = $6::text,\n       summary = $7::text, suggested_next_step = $8::text,\n       model = $9::text, prompt_version = $10::text,\n       qualified_at = now()\n WHERE id = $1::bigint\nRETURNING id::int AS lead_id;",
+        "options": {
+          "queryReplacement": "={{ (() => { const c = $json; const r = c.result || {}; return [\n  c.lead_id, c.route === 'needs_review' ? 'needs_review' : 'qualified', r.score || '',\n  r.intent ?? null, r.urgency ?? null, r.budget_signal ?? null, r.summary ?? null, r.suggested_next_step ?? null,\n  c.model, c.prompt_version ]; })() }}"
+        }
+      },
+      "id": "n020-save-qualification",
+      "name": "Save qualification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3300,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-hot",
+                    "leftValue": "={{ $('Collect result').first().json.route }}",
+                    "rightValue": "hot",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "hot"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-warm",
+                    "leftValue": "={{ $('Collect result').first().json.route }}",
+                    "rightValue": "warm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "warm"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-cold",
+                    "leftValue": "={{ $('Collect result').first().json.route }}",
+                    "rightValue": "cold",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cold"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-needs_review",
+                    "leftValue": "={{ $('Collect result').first().json.route }}",
+                    "rightValue": "needs_review",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "needs_review"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n021-route-by-score",
+      "name": "Route by score",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3520,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO crm_contacts (lead_id, name, email, phone, score, stage, notes)\nVALUES ($1::bigint, $2::text, $3::text, NULLIF($4::text, ''), $5::text, $6::text, $7::text)\nON CONFLICT (lead_id) DO NOTHING\nRETURNING id::int AS crm_id;",
+        "options": {
+          "queryReplacement": "={{ (() => { const c = $('Collect result').first().json; return [ c.lead_id, c.lead.name, c.lead.email, c.lead.phone, c.route, 'hot_follow_up', c.result.summary ]; })() }}"
+        }
+      },
+      "id": "n022-crm:-create-contact-(hot",
+      "name": "CRM: create contact (hot)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3760,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sms_outbox (lead_id, to_phone, body)\nSELECT $1::bigint, $2::text, $3::text WHERE $2::text <> ''\nRETURNING id::int AS sms_id;",
+        "options": {
+          "queryReplacement": "={{ (() => { const c = $('Collect result').first().json; const first = String(c.lead.name).split(/\\s+/)[0].replace(/[\\u0000-\\u001f]/g, '');\n  return [ c.lead_id, c.lead.phone, `Hi ${first}, thanks for reaching out! Book a quick call here: ${$env.BOOKING_LINK_URL}` ]; })() }}"
+        }
+      },
+      "id": "n023-sms:-queue-to-outbox",
+      "name": "SMS: queue to outbox",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3980,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst hdr = (v) => String(v ?? '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').trim().slice(0, 120);\nconst bookingLink = String($env.BOOKING_LINK_URL || '');\nif (!/^https?:\\/\\//i.test(bookingLink)) throw new Error('BOOKING_LINK_URL must be an http(s) URL');\nconst firstName = (n) => String(n).trim().split(/\\s+/)[0];\nconst wrap = (inner) => `<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a\">${inner}</div>`;\nconst cta = (label) => `<p><a href=\"${esc(bookingLink)}\" style=\"display:inline-block;padding:10px 18px;background:#1a56db;color:#ffffff;text-decoration:none;border-radius:6px\">${esc(label)}</a></p>`;\nconst leadTable = (c) => {\n  const row = (k, v) => `<tr><td style=\"padding:3px 12px 3px 0;color:#666;vertical-align:top\">${esc(k)}</td><td style=\"padding:3px 0\">${esc(v)}</td></tr>`;\n  const r = c.result;\n  return `<table style=\"border-collapse:collapse\">${row('Lead ID', c.lead_id)}${row('Name', c.lead.name)}${row('Email', c.lead.email)}${row('Phone', c.lead.phone || '(none)')}${row('Source', c.lead.source)}`\n    + (r ? `${row('Score', r.score)}${row('Intent', r.intent)}${row('Urgency', r.urgency)}${row('Budget signal', r.budget_signal)}${row('Summary', r.summary)}${row('Suggested next step', r.suggested_next_step)}` : '')\n    + `</table><p style=\"color:#666\">Message:</p><blockquote style=\"margin:0;padding-left:12px;border-left:3px solid #ddd;white-space:pre-wrap\">${esc(c.lead.message)}</blockquote>`;\n};\n\nconst c = $('Collect result').first().json;\nconst toLead = {\n  to: c.lead.email,\n  subject: 'Thanks for reaching out - let\\'s book a call',\n  html: wrap(`<p>Hi ${esc(firstName(c.lead.name))},</p><p>Thanks for getting in touch. Based on what you shared, we think a short call is the best next step, and we\\'d like to help you move quickly.</p>${cta('Book a call')}<p>If the button does not work, copy this link: ${esc(bookingLink)}</p><p>Talk soon,<br>The Acme team</p>`),\n};\nconst toOwner = {\n  to: $env.OWNER_EMAIL,\n  subject: `[HOT] New lead: ${hdr(c.lead.name)}`,\n  html: wrap(`<p><strong>HOT lead</strong> - follow up today.</p>${leadTable(c)}`),\n};\nreturn [{ json: toLead }, { json: toOwner }];"
+      },
+      "id": "n024-build-hot-emails",
+      "name": "Build hot emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "n025-send-hot-emails",
+      "name": "Send hot emails",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        4420,
+        0
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "cred-smtp",
+          "name": "Mailpit SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Collect result').first().json;\n\nconst sms = $('SMS: queue to outbox').first().json;\nconst smsDone = sms && sms.sms_id !== undefined;\nreturn [{ json: {\n  lead_id: c.lead_id, event: 'routed', route: 'hot',\n  action_taken: `crm_contact_created; booking_email_sent; ${smsDone ? 'sms_queued_in_outbox' : 'sms_skipped_no_phone'}; owner_notified`,\n  llm_output: c.result, detail: { model: c.model, prompt_version: c.prompt_version, attempts: c.attempts },\n} }];"
+      },
+      "id": "n026-finalize:-hot",
+      "name": "Finalize: hot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4640,
+        0
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO crm_contacts (lead_id, name, email, phone, score, stage, notes)\nVALUES ($1::bigint, $2::text, $3::text, NULLIF($4::text, ''), $5::text, $6::text, $7::text)\nON CONFLICT (lead_id) DO NOTHING\nRETURNING id::int AS crm_id;",
+        "options": {
+          "queryReplacement": "={{ (() => { const c = $('Collect result').first().json; return [ c.lead_id, c.lead.name, c.lead.email, c.lead.phone, c.route, 'nurture', c.result.summary ]; })() }}"
+        }
+      },
+      "id": "n027-crm:-create-contact-(war",
+      "name": "CRM: create contact (warm)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3760,
+        220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst hdr = (v) => String(v ?? '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').trim().slice(0, 120);\nconst bookingLink = String($env.BOOKING_LINK_URL || '');\nif (!/^https?:\\/\\//i.test(bookingLink)) throw new Error('BOOKING_LINK_URL must be an http(s) URL');\nconst firstName = (n) => String(n).trim().split(/\\s+/)[0];\nconst wrap = (inner) => `<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a\">${inner}</div>`;\nconst cta = (label) => `<p><a href=\"${esc(bookingLink)}\" style=\"display:inline-block;padding:10px 18px;background:#1a56db;color:#ffffff;text-decoration:none;border-radius:6px\">${esc(label)}</a></p>`;\nconst leadTable = (c) => {\n  const row = (k, v) => `<tr><td style=\"padding:3px 12px 3px 0;color:#666;vertical-align:top\">${esc(k)}</td><td style=\"padding:3px 0\">${esc(v)}</td></tr>`;\n  const r = c.result;\n  return `<table style=\"border-collapse:collapse\">${row('Lead ID', c.lead_id)}${row('Name', c.lead.name)}${row('Email', c.lead.email)}${row('Phone', c.lead.phone || '(none)')}${row('Source', c.lead.source)}`\n    + (r ? `${row('Score', r.score)}${row('Intent', r.intent)}${row('Urgency', r.urgency)}${row('Budget signal', r.budget_signal)}${row('Summary', r.summary)}${row('Suggested next step', r.suggested_next_step)}` : '')\n    + `</table><p style=\"color:#666\">Message:</p><blockquote style=\"margin:0;padding-left:12px;border-left:3px solid #ddd;white-space:pre-wrap\">${esc(c.lead.message)}</blockquote>`;\n};\n\nconst c = $('Collect result').first().json;\nreturn [{ json: {\n  to: c.lead.email,\n  subject: 'Thanks for your interest - a few ideas to get started',\n  html: wrap(`<p>Hi ${esc(firstName(c.lead.name))},</p><p>Thanks for getting in touch. We\\'ve noted what you\\'re looking for and will share some relevant resources and ideas over the next few days.</p><p>If you\\'d like to talk it through sooner, you can pick a time that suits you:</p>${cta('Book a call')}<p>Best,<br>The Acme team</p>`),\n} }];"
+      },
+      "id": "n028-build-nurture-email",
+      "name": "Build nurture email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3980,
+        220
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "n029-send-nurture-email",
+      "name": "Send nurture email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        4200,
+        220
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "cred-smtp",
+          "name": "Mailpit SMTP"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Collect result').first().json;\n\nreturn [{ json: {\n  lead_id: c.lead_id, event: 'routed', route: 'warm',\n  action_taken: 'crm_contact_created; nurture_email_sent',\n  llm_output: c.result, detail: { model: c.model, prompt_version: c.prompt_version, attempts: c.attempts },\n} }];"
+      },
+      "id": "n030-finalize:-warm",
+      "name": "Finalize: warm",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4420,
+        220
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst hdr = (v) => String(v ?? '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').trim().slice(0, 120);\nconst bookingLink = String($env.BOOKING_LINK_URL || '');\nif (!/^https?:\\/\\//i.test(bookingLink)) throw new Error('BOOKING_LINK_URL must be an http(s) URL');\nconst firstName = (n) => String(n).trim().split(/\\s+/)[0];\nconst wrap = (inner) => `<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a\">${inner}</div>`;\nconst cta = (label) => `<p><a href=\"${esc(bookingLink)}\" style=\"display:inline-block;padding:10px 18px;background:#1a56db;color:#ffffff;text-decoration:none;border-radius:6px\">${esc(label)}</a></p>`;\nconst leadTable = (c) => {\n  const row = (k, v) => `<tr><td style=\"padding:3px 12px 3px 0;color:#666;vertical-align:top\">${esc(k)}</td><td style=\"padding:3px 0\">${esc(v)}</td></tr>`;\n  const r = c.result;\n  return `<table style=\"border-collapse:collapse\">${row('Lead ID', c.lead_id)}${row('Name', c.lead.name)}${row('Email', c.lead.email)}${row('Phone', c.lead.phone || '(none)')}${row('Source', c.lead.source)}`\n    + (r ? `${row('Score', r.score)}${row('Intent', r.intent)}${row('Urgency', r.urgency)}${row('Budget signal', r.budget_signal)}${row('Summary', r.summary)}${row('Suggested next step', r.suggested_next_step)}` : '')\n    + `</table><p style=\"color:#666\">Message:</p><blockquote style=\"margin:0;padding-left:12px;border-left:3px solid #ddd;white-space:pre-wrap\">${esc(c.lead.message)}</blockquote>`;\n};\n\nconst c = $('Collect result').first().json;\nreturn [{ json: {\n  to: c.lead.email,\n  subject: 'Thanks for contacting us',\n  html: wrap(`<p>Hi ${esc(firstName(c.lead.name))},</p><p>Thank you for your message. We\\'ve received it and, if there\\'s a fit, someone from our team will be in touch. In the meantime, we wish you the best with your plans.</p><p>Kind regards,<br>The Acme team</p>`),\n} }];"
+      },
+      "id": "n031-build-auto-reply",
+      "name": "Build auto-reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        440
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "n032-send-auto-reply",
+      "name": "Send auto-reply",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        3980,
+        440
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "cred-smtp",
+          "name": "Mailpit SMTP"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Collect result').first().json;\n\nreturn [{ json: {\n  lead_id: c.lead_id, event: 'routed', route: 'cold',\n  action_taken: 'logged; polite_auto_reply_sent',\n  llm_output: c.result, detail: { model: c.model, prompt_version: c.prompt_version, attempts: c.attempts },\n} }];"
+      },
+      "id": "n033-finalize:-cold",
+      "name": "Finalize: cold",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        440
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst hdr = (v) => String(v ?? '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').trim().slice(0, 120);\nconst bookingLink = String($env.BOOKING_LINK_URL || '');\nif (!/^https?:\\/\\//i.test(bookingLink)) throw new Error('BOOKING_LINK_URL must be an http(s) URL');\nconst firstName = (n) => String(n).trim().split(/\\s+/)[0];\nconst wrap = (inner) => `<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a\">${inner}</div>`;\nconst cta = (label) => `<p><a href=\"${esc(bookingLink)}\" style=\"display:inline-block;padding:10px 18px;background:#1a56db;color:#ffffff;text-decoration:none;border-radius:6px\">${esc(label)}</a></p>`;\nconst leadTable = (c) => {\n  const row = (k, v) => `<tr><td style=\"padding:3px 12px 3px 0;color:#666;vertical-align:top\">${esc(k)}</td><td style=\"padding:3px 0\">${esc(v)}</td></tr>`;\n  const r = c.result;\n  return `<table style=\"border-collapse:collapse\">${row('Lead ID', c.lead_id)}${row('Name', c.lead.name)}${row('Email', c.lead.email)}${row('Phone', c.lead.phone || '(none)')}${row('Source', c.lead.source)}`\n    + (r ? `${row('Score', r.score)}${row('Intent', r.intent)}${row('Urgency', r.urgency)}${row('Budget signal', r.budget_signal)}${row('Summary', r.summary)}${row('Suggested next step', r.suggested_next_step)}` : '')\n    + `</table><p style=\"color:#666\">Message:</p><blockquote style=\"margin:0;padding-left:12px;border-left:3px solid #ddd;white-space:pre-wrap\">${esc(c.lead.message)}</blockquote>`;\n};\n\nconst c = $('Collect result').first().json;\nconst f = c.failure || {};\nreturn [{ json: {\n  to: $env.OWNER_EMAIL,\n  subject: `[NEEDS REVIEW] Lead ${hdr(c.lead.name)} could not be auto-qualified`,\n  html: wrap(`<p><strong>Needs review.</strong> The model output was unavailable or invalid after one retry, so no automated action was taken on this lead.</p><p>Reason: ${esc(f.reason)}<br>Details: ${esc((f.errors || []).join('; '))}</p>${leadTable(c)}`),\n} }];"
+      },
+      "id": "n034-build-review-alert",
+      "name": "Build review alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        660
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "n035-notify-owner-(needs-revi",
+      "name": "Notify owner (needs review)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        3980,
+        660
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "cred-smtp",
+          "name": "Mailpit SMTP"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Collect result').first().json;\n\nreturn [{ json: {\n  lead_id: c.lead_id, event: 'needs_review', route: 'needs_review',\n  action_taken: 'owner_notified; no automated action',\n  llm_output: c.failure, detail: { model: c.model, prompt_version: c.prompt_version, attempts: c.attempts },\n} }];"
+      },
+      "id": "n036-finalize:-needs_review",
+      "name": "Finalize: needs_review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        660
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (lead_id, event, score, llm_output, action_taken, detail)\nVALUES ($1::bigint, $2::text, $3::text, $4::jsonb, $5::text, $6::jsonb)\nRETURNING lead_id::int AS lead_id, score AS route, action_taken;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead_id, $json.event, $json.route, JSON.stringify($json.llm_output), $json.action_taken, JSON.stringify($json.detail) ] }}"
+        }
+      },
+      "id": "n037-write-audit-row",
+      "name": "Write audit row",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        4900,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, duplicate: false, lead_id: $json.lead_id, route: $json.route, score: ['hot', 'warm', 'cold'].includes($json.route) ? $json.route : null, action_taken: $json.action_taken } }}",
+        "options": {}
+      },
+      "id": "n038-respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        5120,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Lead webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalise": {
+      "main": [
+        [
+          {
+            "node": "Valid input?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid input?": {
+      "main": [
+        [
+          {
+            "node": "Insert lead (idempotent)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 400",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert lead (idempotent)": {
+      "main": [
+        [
+          {
+            "node": "New lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New lead?": {
+      "main": [
+        [
+          {
+            "node": "Read prompt + schema",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Audit: duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit: duplicate": {
+      "main": [
+        [
+          {
+            "node": "Respond duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read prompt + schema": {
+      "main": [
+        [
+          {
+            "node": "Extract text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract text": {
+      "main": [
+        [
+          {
+            "node": "Prepare Claude request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Claude request": {
+      "main": [
+        [
+          {
+            "node": "Claude (attempt 1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude (attempt 1)": {
+      "main": [
+        [
+          {
+            "node": "Validate output (1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate output (1)": {
+      "main": [
+        [
+          {
+            "node": "Valid output? (1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid output? (1)": {
+      "main": [
+        [
+          {
+            "node": "Collect result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare retry": {
+      "main": [
+        [
+          {
+            "node": "Claude (attempt 2)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude (attempt 2)": {
+      "main": [
+        [
+          {
+            "node": "Validate output (2)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate output (2)": {
+      "main": [
+        [
+          {
+            "node": "Valid output? (2)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid output? (2)": {
+      "main": [
+        [
+          {
+            "node": "Collect result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect result": {
+      "main": [
+        [
+          {
+            "node": "Save qualification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save qualification": {
+      "main": [
+        [
+          {
+            "node": "Route by score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by score": {
+      "main": [
+        [
+          {
+            "node": "CRM: create contact (hot)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM: create contact (warm)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build auto-reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build review alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: create contact (hot)": {
+      "main": [
+        [
+          {
+            "node": "SMS: queue to outbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SMS: queue to outbox": {
+      "main": [
+        [
+          {
+            "node": "Build hot emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build hot emails": {
+      "main": [
+        [
+          {
+            "node": "Send hot emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send hot emails": {
+      "main": [
+        [
+          {
+            "node": "Finalize: hot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM: create contact (warm)": {
+      "main": [
+        [
+          {
+            "node": "Build nurture email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build nurture email": {
+      "main": [
+        [
+          {
+            "node": "Send nurture email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send nurture email": {
+      "main": [
+        [
+          {
+            "node": "Finalize: warm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build auto-reply": {
+      "main": [
+        [
+          {
+            "node": "Send auto-reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send auto-reply": {
+      "main": [
+        [
+          {
+            "node": "Finalize: cold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build review alert": {
+      "main": [
+        [
+          {
+            "node": "Notify owner (needs review)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify owner (needs review)": {
+      "main": [
+        [
+          {
+            "node": "Finalize: needs_review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize: hot": {
+      "main": [
+        [
+          {
+            "node": "Write audit row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize: warm": {
+      "main": [
+        [
+          {
+            "node": "Write audit row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize: cold": {
+      "main": [
+        [
+          {
+            "node": "Write audit row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize: needs_review": {
+      "main": [
+        [
+          {
+            "node": "Write audit row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write audit row": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "lead-error-handler"
+  },
+  "pinData": {}
+}

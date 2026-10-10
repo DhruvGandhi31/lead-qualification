@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "qualify.v1.schema.json",
+  "title": "Lead qualification result (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["score", "intent", "urgency", "budget_signal", "summary", "suggested_next_step"],
+  "properties": {
+    "score": { "type": "string", "enum": ["hot", "warm", "cold"] },
+    "intent": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "urgency": { "type": "string", "enum": ["high", "medium", "low"] },
+    "budget_signal": { "type": "string", "enum": ["stated", "implied", "none"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 600 },
+    "suggested_next_step": { "type": "string", "minLength": 1, "maxLength": 400 }
+  }
+}

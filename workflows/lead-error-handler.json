@@ -1,0 +1,136 @@
+{
+  "id": "lead-error-handler",
+  "name": "Lead Intake - Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "n039-error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $input.first().json;\nconst wf = e.workflow || {};\nconst ex = e.execution || {};\nreturn [{ json: {\n  workflow: wf.name || 'unknown', execution_id: ex.id || null, failed_node: ex.lastNodeExecuted || null,\n  message: (ex.error && ex.error.message) || 'unknown error', mode: ex.mode || null,\n} }];"
+      },
+      "id": "n040-describe-error",
+      "name": "Describe error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst hdr = (v) => String(v ?? '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').trim().slice(0, 120);\n\nconst d = $input.first().json;\nconst row = (k, v) => `<tr><td style=\"padding:3px 12px 3px 0;color:#666\">${esc(k)}</td><td>${esc(v)}</td></tr>`;\nreturn [{ json: {\n  to: $env.OWNER_EMAIL,\n  subject: `[ERROR] ${hdr(d.workflow)} failed at ${hdr(d.failed_node)}`,\n  html: `<div style=\"font-family:Arial,sans-serif\"><p><strong>A workflow execution failed.</strong></p><table>${row('Workflow', d.workflow)}${row('Failed node', d.failed_node)}${row('Execution ID', d.execution_id)}${row('Error', d.message)}</table></div>`,\n} }];"
+      },
+      "id": "n041-build-owner-alert",
+      "name": "Build owner alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "n042-email-owner",
+      "name": "Email owner",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        660,
+        -120
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "cred-smtp",
+          "name": "Mailpit SMTP"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (lead_id, event, score, llm_output, action_taken, detail)\nVALUES (NULL, 'workflow_error', NULL, NULL, 'owner_alerted_by_email', $1::jsonb)\nRETURNING id::int AS audit_id;",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json) ] }}"
+        }
+      },
+      "id": "n043-write-error-audit-row",
+      "name": "Write error audit row",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        440,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred-postgres",
+          "name": "Leads Postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Describe error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Describe error": {
+      "main": [
+        [
+          {
+            "node": "Build owner alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Write error audit row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build owner alert": {
+      "main": [
+        [
+          {
+            "node": "Email owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

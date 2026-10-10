@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# Generated at runtime by scripts/init-n8n.sh (contains decrypted secrets). Never commit.
+/tmp/
+credentials.rendered.json
+# Raw eval run output is committed deliberately under eval/results/; scratch files are not.
+eval/scratch/
